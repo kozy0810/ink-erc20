@@ -28,8 +28,11 @@ std = [
     "ink_metadata/std",
     "ink_env/std",
     "ink_storage/std",
-    "ink_primitives/std",
+    "ink_lang/std",
     "scale/std",
+    "scale-info",
+    "ink_primitives/std",
+    "ink_metadata",
     "scale-info/std",
 ]
 ink-as-dependency = []
