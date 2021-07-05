@@ -69,21 +69,21 @@ mod erc20 {
         // Returns thee total token supply.
         #[ink(message)]
         pub fn total_supply(&self) -> Balance {
-            *self.total_supply()
+            *self.total_supply
         }
 
         // Returns the account balance for the specified `owner`
         // Returns `0` if the account is non-existent.
         #[ink(message)]
         pub fn balance_of(&self, owner: AccountId) -> Balance {
-            self.balances.get(&owner).copied().unwrap_or(0);
+            self.balances.get(&owner).copied().unwrap_or(0)
         }
 
         // Returns the amount which `spender` is still allowed to withdraw from `owner`.
         // Returns `0` if no allowance has been set `0`
         #[ink(message)]
-        pub fn allowances(&self, owner: AccountId, spender: AccountId) -> Balance {
-            self.balances.get(&(owner, spender)).copied().unwrap_or(0);
+        pub fn allowance(&self, owner: AccountId, spender: AccountId) -> Balance {
+            self.allowances.get(&(owner, spender)).copied().unwrap_or(0)
         }
 
         // Transfers `value` amount of tokens from the caller's account to account `to`.
@@ -93,7 +93,22 @@ mod erc20 {
         #[ink(message)]
         pub fn transfer(&mut self, to: AccountId, value: Balance) -> Result<()> {
             let from = self.env().caller();
-            self.transfer_from_to(from, to, value);
+            self.transfer_from_to(from, to, value)
+        }
+
+        // Allows `spender` to withdraw from the caller's account multiple times, up to the `value` amount.
+        // If this functions is called acain it overwrites the current allowance with `value`.
+        // An `Approval` event is emitted.
+        #[ink(message)]
+        pub fn approve(&mut self, spender: AccountId, value: Balance) -> Result<()> {
+            let owner = self.env().caller();
+            self.allowances.insert((owner, spender), value);
+            self.env().emit_event(Approval {
+                owner,
+                spender,
+                value
+            });
+            Ok(())
         }
 
         // Allows `spender` to withdraw from the caller's account multiple times, up to the `value` amount.
@@ -150,40 +165,40 @@ mod erc20 {
 
         fn assert_transfer_event(
             event: &ink_env::test::EmittedEvent,
-            expected_form: Option<AccountId>,
+            expected_from: Option<AccountId>,
             expected_to: Option<AccountId>,
             expected_value: Balance,
         ) {
             let decoded_event = <Event as scale::Decode>::decode(&mut &event.data[..])
                 .expect("encountered invalid contract event data buffer");
             if let Event::Transfer(Transfer{ from, to, value }) = decoded_event{
-                assert_eq!(from, expected_form, "encountered invalid Transfer.from");
+                assert_eq!(from, expected_from, "encountered invalid Transfer.from");
                 assert_eq!(to, expected_to, "encountered invalid Transfer.to");
-                assert_eq!(to, expected_value, "encountered invalid Trasfer.value");
+                assert_eq!(value, expected_value, "encountered invalid Trasfer.value");
             } else {
                 panic!("encountered unexpected event kind: expected a Transfer event");
             }
             let expected_topics = vec![
-                encorded_into_hash(&PrefixedValue {
+                encoded_into_hash(&PrefixedValue {
                     value: b"Erc20::Transfer",
                     prefix: b"",
                 }),
-                encorded_into_hash(&PrefixedValue {
+                encoded_into_hash(&PrefixedValue {
                     prefix: b"Erc20::Transfer::from",
-                    value: &expected_form,
+                    value: &expected_from,
                 }),
-                encorded_into_hash(&PrefixedValue {
+                encoded_into_hash(&PrefixedValue {
                     prefix: b"Erc20::Transfer::to",
                     value: &expected_to,
                 }),
-                encorded_into_hash(&PrefixedValue {
+                encoded_into_hash(&PrefixedValue {
                     prefix: b"Erc20::Transfer::value",
                     value: &expected_value,
                 }),
             ];
 
             for (n, (actual_topic,  expected_topic)) in
-                event.topics.iter().zip(expected_topics).enumurate()
+                event.topics.iter().zip(expected_topics).enumerate()
             {
                 let topic = actual_topic
                     .decode::<Hash>()
@@ -221,14 +236,115 @@ mod erc20 {
             assert_eq!(erc20.total_supply(), 100);
         }
 
+        #[ink::test]
+        fn balance_of_works() {
+            let erc20 = Erc20::new(100);
+            let emitted_events = ink_env::test::recorded_events().collect::<Vec<_>>();
+            assert_transfer_event(&emitted_events[0], None, Some(AccountId::from([0x01; 32])), 100);
+            let accounts =
+                ink_env::test::default_accounts::<ink_env::DefaultEnvironment>()
+                .expect("Cannot get accounts");
+            assert_eq!(erc20.balance_of(accounts.alice), 100);
+            assert_eq!(erc20.balance_of(accounts.bob), 0);;
+        }
 
-        // /// We test a simple use case of our contract.
-        // #[ink::test]
-        // fn it_works() {
-        //     let mut erc20 = Erc20::new(false);
-        //     assert_eq!(erc20.get(), false);
-        //     erc20.flip();
-        //     assert_eq!(erc20.get(), true);
-        // }
+        #[ink::test]
+        fn transfer_works() {
+            let mut erc20 = Erc20::new(100);
+            let accounts =
+                ink_env::test::default_accounts::<ink_env::DefaultEnvironment>()
+                .expect("Cannot get accounts");
+            assert_eq!(erc20.balance_of(accounts.bob), 0);
+            assert_eq!(erc20.transfer(accounts.bob, 10), Ok(()));
+            assert_eq!(erc20.balance_of(accounts.bob), 10);
+
+            let emitted_events = ink_env::test::recorded_events().collect::<Vec<_>>();
+            assert_eq!(emitted_events.len(), 2);
+            assert_transfer_event(&emitted_events[0], None, Some(AccountId::from([0x01; 32])), 100);
+            assert_transfer_event(
+                &emitted_events[1],
+                Some(AccountId::from([0x01; 32])),
+                Some(AccountId::from([0x02; 32])),
+                10
+            );
+        }
+
+        #[ink::test]
+        fn allowance_must_not_change_on_failed_transfer() {
+            let mut erc20 = Erc20::new(100);
+            let accounts = ink_env::test::default_accounts::<ink_env::DefaultEnvironment>()
+                .expect("Cannot get accounts");
+
+            let alice_balance = erc20.balance_of(accounts.alice);
+            let initial_allowance = alice_balance + 2;
+            assert_eq!(erc20.approve(accounts.bob, initial_allowance), Ok(()));
+
+            let callee = ink_env::account_id::<ink_env::DefaultEnvironment>().unwrap_or([0x0; 32].into());
+            let mut data = ink_env::test::CallData::new(ink_env::call::Selector::new([0x00; 4]));
+            data.push_arg(&accounts.bob);
+            ink_env::test::push_execution_context::<ink_env::DefaultEnvironment>(
+                accounts.bob,
+                callee,
+                1000000,
+                1000000,
+                data,
+            );
+
+            let emitted_events_before = ink_env::test::recorded_events().collect::<Vec<_>>();
+            assert_eq!(erc20.transfer_from(accounts.alice, accounts.eve, alice_balance + 1),  Err(Error::InsufficientBalance));
+            assert_eq!(erc20.allowance(accounts.alice, accounts.bob), initial_allowance);
+
+            let emitted_events_after = ink_env::test::recorded_events().collect::<Vec<_>>();
+            assert_eq!(emitted_events_before.len(), emitted_events_after.len());
+        }
+    }
+
+    struct PrefixedValue<'a, 'b, T> {
+        pub prefix: &'a [u8],
+        pub value: &'b T,
+    }
+
+    impl<X> scale::Encode for PrefixedValue<'_, '_, X>
+    where
+        X: scale::Encode,
+    {
+        #[inline]
+        fn size_hint(&self) -> usize {
+            self.prefix.size_hint() + self.value.size_hint()
+        }
+
+        #[inline]
+        fn encode_to<T: scale::Output + ?Sized>(&self, dest: &mut T)   {
+            self.prefix.encode_to(dest);
+            self.value.encode_to(dest);
+        }
+    }
+
+    #[cfg(test)]
+    fn encoded_into_hash<T>(entity: &T) -> Hash
+    where
+        T: scale::Encode,
+    {
+        use ink_env::{
+            hash::{
+                Blake2x256,
+                CryptoHash,
+                HashOutput,
+            },
+            Clear,
+        };
+        let mut result = Hash::clear();
+        let len_result = result.as_ref().len();
+        let encoded = entity.encode();
+        let len_encoded = encoded.len();
+        if len_encoded <= len_result {
+            result.as_mut()[..len_encoded].copy_from_slice(&encoded);
+            return result
+        }
+        let mut hash_output = <<Blake2x256 as HashOutput>::Type as Default>::default();
+        <Blake2x256 as CryptoHash>::hash(&encoded, &mut hash_output);
+        let copy_len = core::cmp::min(hash_output.len(), len_result);
+        result.as_mut()[0..copy_len].copy_from_slice(&hash_output[0..copy_len]);
+        result
     }
 }
